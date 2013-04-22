@@ -122,6 +122,7 @@ extendFlags pkgIx =
   >=> getLicense
   >=> getAuthorInfo
   >=> getHomepage
+  >=> getSrcRepoAndBugs
   >=> getSynopsis
   >=> getCategory
   >=> getExtraSourceFiles
@@ -201,17 +202,25 @@ getAuthorInfo flags = do
 -- | Prompt for a homepage URL.
 getHomepage :: InitFlags -> IO InitFlags
 getHomepage flags = do
-  hp  <- queryHomepage
-  hp' <-     return (flagToMaybe $ homepage flags)
-         ?>> maybePrompt flags (promptStr "Project homepage URL" hp)
-         ?>> return hp
+  hp  <-     return (flagToMaybe $ homepage flags)
+         ?>> maybePrompt flags (promptStr "Project homepage URL" Nothing)
 
-  return $ flags { homepage = maybeToFlag hp' }
+  return $ flags { homepage = maybeToFlag hp }
 
--- | Right now this does nothing, but it could be changed to do some
---   intelligent guessing.
-queryHomepage :: IO (Maybe String)
-queryHomepage = return Nothing     -- get default remote darcs repo?
+getSrcRepoAndBugs :: InitFlags -> IO InitFlags
+getSrcRepoAndBugs flags = do
+  (repo, bugs) <- guessSrcRepoAndTracker
+  repo' <-     return (flagToMaybe $ srcRepo flags)
+           ?>> maybePrompt flags (promptStr "Source repository URL" repo)
+           ?>> return repo
+
+  bugs' <-     return (flagToMaybe $ bugReports flags)
+           ?>> maybePrompt flags (promptStr "Bug tracker URL" bugs)
+           ?>> return bugs
+
+  return $ flags { srcRepo    = maybeToFlag repo'
+                 , bugReports = maybeToFlag bugs'
+                 }
 
 -- | Prompt for a project synopsis.
 getSynopsis :: InitFlags -> IO InitFlags

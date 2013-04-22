@@ -94,6 +94,8 @@ instance Monoid InitFlags where
     , author         = mempty
     , email          = mempty
     , homepage       = mempty
+    , srcRepo        = mempty
+    , bugReports     = mempty
     , synopsis       = mempty
     , category       = mempty
     , extraSrc       = mempty
@@ -121,6 +123,8 @@ instance Monoid InitFlags where
     , author         = combine author
     , email          = combine email
     , homepage       = combine homepage
+    , srcRepo        = combine srcRepo
+    , bugReports     = combine bugReports
     , synopsis       = combine synopsis
     , category       = combine category
     , extraSrc       = combine extraSrc
