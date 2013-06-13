@@ -69,7 +69,7 @@ import Distribution.Client.Init.Types
 import Distribution.Client.Init.Licenses
   ( bsd3, gplv2, gplv3, lgpl2, lgpl3, apache20 )
 import Distribution.Client.Init.Heuristics
-  ( guessPackageName, guessAuthorNameMail, SourceFileEntry(..), scanForModules, neededBuildPrograms )
+  ( guessPackageName, guessAuthorNameMail, SourceFileEntry(..), scanForModules, neededBuildPrograms, guessSrcRepoAndTracker )
 
 import Distribution.License
   ( License(..), knownLicenses )

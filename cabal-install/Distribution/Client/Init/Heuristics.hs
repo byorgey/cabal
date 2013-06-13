@@ -17,6 +17,7 @@ module Distribution.Client.Init.Heuristics (
     neededBuildPrograms,
     guessAuthorNameMail,
     knownCategories,
+    guessSrcRepoAndTracker
 ) where
 import Distribution.Text         (simpleParse)
 import Distribution.Simple.Setup (Flag(..))
@@ -30,6 +31,7 @@ import Distribution.Simple.Utils
          ( intercalate )
 import Language.Haskell.Extension ( Extension )
 
+import Network.URI (URI)
 import Distribution.Client.Types ( packageDescription, SourcePackageDb(..) )
 import Control.Applicative ( pure, (<$>), (<*>) )
 import Control.Monad ( liftM )
@@ -308,6 +310,11 @@ splitString sep str = go str where
 
 nubSet :: (Ord a) => [a] -> [a]
 nubSet = Set.toList . Set.fromList
+
+-- Guess source repo and bug tracker
+
+guessSrcRepoAndTracker :: IO (Maybe URI, Maybe URI)
+guessSrcRepoAndTracker = undefined
 
 {-
 test db testProjectRoot = do
