@@ -23,6 +23,7 @@ import Distribution.License
 import Distribution.ModuleName
 import Language.Haskell.Extension ( Language(..), Extension )
 
+import Network.URI (URI)
 import qualified Text.PrettyPrint as Disp
 import qualified Distribution.Compat.ReadP as Parse
 import Distribution.Text
@@ -48,7 +49,7 @@ data InitFlags =
               , author       :: Flag String
               , email        :: Flag String
               , homepage     :: Flag String
-              , srcRepo      :: Flag RemoteRepo
+              , srcRepo      :: Flag URI
               , bugReports   :: Flag URI
 
               , synopsis     :: Flag String
