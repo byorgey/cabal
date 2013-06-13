@@ -48,6 +48,8 @@ data InitFlags =
               , author       :: Flag String
               , email        :: Flag String
               , homepage     :: Flag String
+              , srcRepo      :: Flag RemoteRepo
+              , bugReports   :: Flag URI
 
               , synopsis     :: Flag String
               , category     :: Flag (Either String Category)
