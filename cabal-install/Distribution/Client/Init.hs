@@ -30,6 +30,8 @@ import System.FilePath
   ( (</>), (<.>), takeBaseName )
 import Data.Time
   ( getCurrentTime, utcToLocalTime, toGregorian, localDay, getCurrentTimeZone )
+import Network.URI
+  ( parseURI )
 
 import Data.Char
   ( toUpper )
@@ -209,15 +211,18 @@ getHomepage flags = do
 
   return $ flags { homepage = maybeToFlag hp }
 
+-- | Prompt for source repo and bug tracker URLs.
 getSrcRepoAndBugs :: InitFlags -> IO InitFlags
 getSrcRepoAndBugs flags = do
   (repo, bugs) <- guessSrcRepoAndTracker
   repo' <-     return (flagToMaybe $ srcRepo flags)
-           ?>> maybePrompt flags (promptStr "Source repository URL" repo)
+           ?>> join <$>
+                 maybePrompt flags (parseURI <$> promptStr "Source repository URL" (show <$> repo))
            ?>> return repo
 
   bugs' <-     return (flagToMaybe $ bugReports flags)
-           ?>> maybePrompt flags (promptStr "Bug tracker URL" bugs)
+           ?>> join <$>
+                 maybePrompt flags (parseURI <$> promptStr "Bug tracker URL" (show <$> bugs))
            ?>> return bugs
 
   return $ flags { srcRepo    = maybeToFlag repo'

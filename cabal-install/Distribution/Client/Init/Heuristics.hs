@@ -316,7 +316,7 @@ nubSet = Set.toList . Set.fromList
 -- Guess source repo and bug tracker
 
 guessSrcRepoAndTracker :: IO (Maybe URI, Maybe URI)
-guessSrcRepoAndTracker = undefined
+guessSrcRepoAndTracker = return (Nothing, Nothing)
 
 {-
 test db testProjectRoot = do
