@@ -1,13 +1,18 @@
-{-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE ForeignFunctionInterface, CPP #-}
 
 module Distribution.Client.Utils ( MergeResult(..)
                                  , mergeBy, duplicates, duplicatesBy
-                                 , moreRecentFile, inDir, numberOfProcessors
+                                 , inDir, numberOfProcessors
+                                 , removeExistingFile
                                  , makeAbsoluteToCwd, filePathToByteString
-                                 , byteStringToFilePath)
+                                 , byteStringToFilePath, tryCanonicalizePath
+                                 , canonicalizePathNoThrow )
        where
 
+import Distribution.Compat.Exception ( catchIO )
 import qualified Data.ByteString.Lazy as BS
+import Control.Monad
+         ( when )
 import Data.Bits
          ( (.|.), shiftL, shiftR )
 import Data.Char
@@ -20,11 +25,16 @@ import Foreign.C.Types ( CInt(..) )
 import qualified Control.Exception as Exception
          ( finally )
 import System.Directory
-         ( doesFileExist, getModificationTime
-         , getCurrentDirectory, setCurrentDirectory )
+         ( canonicalizePath, doesFileExist, getCurrentDirectory
+         , removeFile, setCurrentDirectory )
 import System.FilePath
          ( (</>), isAbsolute )
 import System.IO.Unsafe ( unsafePerformIO )
+
+#if defined(mingw32_HOST_OS)
+import Control.Monad (liftM2, unless)
+import System.Directory (doesDirectoryExist)
+#endif
 
 -- | Generic merging utility. For sorted input lists this is a full outer join.
 --
@@ -55,22 +65,16 @@ duplicatesBy cmp = filter moreThanOne . groupBy eq . sortBy cmp
     moreThanOne (_:_:_) = True
     moreThanOne _       = False
 
--- | Compare the modification times of two files to see if the first is newer
--- than the second. The first file must exist but the second need not.
--- The expected use case is when the second file is generated using the first.
--- In this use case, if the result is True then the second file is out of date.
---
-moreRecentFile :: FilePath -> FilePath -> IO Bool
-moreRecentFile a b = do
-  exists <- doesFileExist b
-  if not exists
-    then return True
-    else do tb <- getModificationTime b
-            ta <- getModificationTime a
-            return (ta > tb)
+-- | Like 'removeFile', but does not throw an exception when the file does not
+-- exist.
+removeExistingFile :: FilePath -> IO ()
+removeExistingFile path = do
+  exists <- doesFileExist path
+  when exists $
+    removeFile path
 
 -- | Executes the action in the specified directory.
-inDir :: Maybe FilePath -> IO () -> IO ()
+inDir :: Maybe FilePath -> IO a -> IO a
 inDir Nothing m = m
 inDir (Just d) m = do
   old <- getCurrentDirectory
@@ -125,3 +129,23 @@ byteStringToFilePath bs | bslen `mod` 4 /= 0 = unexpected
         b1 = fromIntegral $ BS.index bs (i + 1)
         b2 = fromIntegral $ BS.index bs (i + 2)
         b3 = fromIntegral $ BS.index bs (i + 3)
+
+-- | Workaround for the inconsistent behaviour of 'canonicalizePath'. It throws
+-- an error if the path refers to a non-existent file on *nix, but not on
+-- Windows.
+tryCanonicalizePath :: FilePath -> IO FilePath
+tryCanonicalizePath path = do
+  ret <- canonicalizePath path
+#if defined(mingw32_HOST_OS)
+  exists <- liftM2 (||) (doesFileExist ret) (doesDirectoryExist ret)
+  unless exists $
+    error $ ret ++ ": canonicalizePath: does not exist "
+                ++ "(No such file or directory)"
+#endif
+  return ret
+
+-- | A non-throwing wrapper for 'canonicalizePath'. If 'canonicalizePath' throws
+-- an exception, returns the path argument unmodified.
+canonicalizePathNoThrow :: FilePath -> IO FilePath
+canonicalizePathNoThrow path = do
+  canonicalizePath path `catchIO` (\_ -> return path)

@@ -53,7 +53,8 @@ module Distribution.ParseUtils (
         runP, runE, ParseResult(..), catchParseError, parseFail, showPWarning,
         Field(..), fName, lineNo,
         FieldDescr(..), ppField, ppFields, readFields, readFieldsFlat,
-        showFields, showSingleNamedField, parseFields, parseFieldsFlat,
+        showFields, showSingleNamedField, showSimpleSingleNamedField,
+        parseFields, parseFieldsFlat,
         parseFilePathQ, parseTokenQ, parseTokenQ',
         parseModuleNameQ, parseBuildTool, parsePkgconfigDependency,
         parseOptVersion, parsePackageNameQ, parseVersionRangeQ,
@@ -86,7 +87,8 @@ import Data.Char (isSpace, toLower, isAlphaNum, isDigit)
 import Data.Maybe       (fromMaybe)
 import Data.Tree as Tree (Tree(..), flatten)
 import qualified Data.Map as Map
-import Control.Monad (foldM)
+import Control.Monad (foldM, ap) 
+import Control.Applicative (Applicative(..))
 import System.FilePath (normalise)
 import Data.List (sortBy)
 
@@ -113,6 +115,15 @@ showPWarning fpath (UTFWarning line fname) =
 
 data ParseResult a = ParseFailed PError | ParseOk [PWarning] a
         deriving Show
+
+instance Functor ParseResult where
+        fmap _ (ParseFailed err) = ParseFailed err
+        fmap f (ParseOk ws x) = ParseOk ws $ f x
+        
+instance Applicative ParseResult where
+        pure = return
+        (<*>) = ap
+        
 
 instance Monad ParseResult where
         return = ParseOk []
@@ -278,6 +289,13 @@ showSingleNamedField fields f =
   case [ get | (FieldDescr f' get _) <- fields, f' == f ] of
     []      -> Nothing
     (get:_) -> Just (render . ppField f . get)
+
+showSimpleSingleNamedField :: [FieldDescr a] -> String -> Maybe (a -> String)
+showSimpleSingleNamedField fields f =
+  case [ get | (FieldDescr f' get _) <- fields, f' == f ] of
+    []      -> Nothing
+    (get:_) -> Just (renderStyle myStyle . get)
+ where myStyle = style { mode = LeftMode }
 
 parseFields :: [FieldDescr a] -> a -> String -> ParseResult a
 parseFields fields initial str =

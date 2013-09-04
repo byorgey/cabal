@@ -86,8 +86,8 @@ import Data.Maybe ( mapMaybe )
 import System.Directory
     ( createDirectoryIfMissing, doesDirectoryExist, doesFileExist
     , getCurrentDirectory, getDirectoryContents, removeDirectoryRecursive
-    , removeFile )
-import System.Environment ( getEnvironment )
+    , removeFile, setCurrentDirectory )
+import Distribution.Compat.Environment ( getEnvironment )
 import System.Exit ( ExitCode(..), exitFailure, exitWith )
 import System.FilePath ( (</>), (<.>) )
 import System.IO ( hClose, IOMode(..), openFile )
@@ -223,8 +223,8 @@ testController flags pkg_descr lbi suite preTest cmd postTest logNamer = do
               hLog <- openFile tempLog AppendMode
               hIn  <- openFile tempInput ReadMode
               -- these handles get closed by rawSystemIOWithEnv
-              rawSystemIOWithEnv verbosity cmd opts shellEnv (Just hIn)
-                  (Just hLog) (Just hLog)
+              rawSystemIOWithEnv verbosity cmd opts Nothing (Just shellEnv)
+                                 (Just hIn) (Just hLog) (Just hLog)
 
             -- Generate TestSuiteLog from executable exit code and a machine-
             -- readable test log
@@ -499,7 +499,10 @@ simpleTestStub m = unlines
 stubMain :: IO [Test] -> IO ()
 stubMain tests = do
     (f, n) <- fmap read getContents
-    tests >>= stubRunTests >>= stubWriteLog f n
+    dir <- getCurrentDirectory
+    results <- tests >>= stubRunTests
+    setCurrentDirectory dir
+    stubWriteLog f n results
 
 -- | The test runner used in library "TestSuite" stub executables.  Runs a list
 -- of 'Test's.  An executable calling this function is meant to be invoked as

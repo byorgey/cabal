@@ -54,7 +54,7 @@ import Text.PrettyPrint hiding (mode, cat)
 import Data.Version
   ( Version(..) )
 import Distribution.Version
-  ( orLaterVersion, withinVersion, VersionRange )
+  ( orLaterVersion, earlierVersion, intersectVersionRanges, VersionRange )
 import Distribution.Verbosity
   ( Verbosity )
 import Distribution.ModuleName
@@ -67,9 +67,10 @@ import Language.Haskell.Extension ( Language(..) )
 import Distribution.Client.Init.Types
   ( InitFlags(..), PackageType(..), Category(..) )
 import Distribution.Client.Init.Licenses
-  ( bsd3, gplv2, gplv3, lgpl2, lgpl3, apache20 )
+  ( bsd3, gplv2, gplv3, lgpl2, lgpl3, agplv3, apache20 )
 import Distribution.Client.Init.Heuristics
-  ( guessPackageName, guessAuthorNameMail, SourceFileEntry(..), scanForModules, neededBuildPrograms, guessSrcRepoAndTracker )
+  ( guessPackageName, guessAuthorNameMail, SourceFileEntry(..),
+    scanForModules, neededBuildPrograms, guessSrcRepoAndTracker )
 
 import Distribution.License
   ( License(..), knownLicenses )
@@ -179,7 +180,8 @@ getLicense flags = do
   return $ flags { license = maybeToFlag lic }
   where
     listedLicenses =
-      knownLicenses \\ [GPL Nothing, LGPL Nothing, Apache Nothing, OtherLicense]
+      knownLicenses \\ [GPL Nothing, LGPL Nothing, AGPL Nothing
+                       , Apache Nothing, OtherLicense]
 
 -- | The author's name and email. Prompt, or try to guess from an existing
 --   darcs repo.
@@ -408,7 +410,18 @@ chooseDep flags (m, Just ps)
                             (pvpize . maximum . map P.pkgVersion $ pids)
 
     pvpize :: Version -> VersionRange
-    pvpize v = withinVersion $ v { versionBranch = take 2 (versionBranch v) }
+    pvpize v = orLaterVersion v'
+               `intersectVersionRanges`
+               earlierVersion (incVersion 1 v')
+      where v' = (v { versionBranch = take 2 (versionBranch v) })
+
+incVersion :: Int -> Version -> Version
+incVersion n (Version vlist tags) = Version (incVersion' n vlist) tags
+  where
+    incVersion' 0 []     = [1]
+    incVersion' 0 (v:_)  = [v+1]
+    incVersion' m []     = replicate m 0 ++ [1]
+    incVersion' m (v:vs) = v : incVersion' (m-1) vs
 
 ---------------------------------------------------------------------------
 --  Prompting/user interaction  -------------------------------------------
@@ -550,6 +563,9 @@ writeLicense flags = do
 
           Flag (LGPL (Just (Version {versionBranch = [3]})))
             -> Just lgpl3
+
+          Flag (AGPL (Just (Version {versionBranch = [3]})))
+            -> Just agplv3
 
           Flag (Apache (Just (Version {versionBranch = [2, 0]})))
             -> Just apache20
@@ -803,4 +819,3 @@ generateWarnings flags = do
 message :: InitFlags -> String -> IO ()
 message (InitFlags{quiet = Flag True}) _ = return ()
 message _ s = putStrLn s
-

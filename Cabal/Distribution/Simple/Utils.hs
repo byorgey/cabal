@@ -50,7 +50,7 @@ module Distribution.Simple.Utils (
         -- * logging and errors
         die,
         dieWithLocation,
-        topHandler,
+        topHandler, topHandlerWith,
         warn, notice, setupMessage, info, debug,
         debugNoWrap, chattyTry,
 
@@ -72,11 +72,15 @@ module Distribution.Simple.Utils (
         copyFileVerbose,
         copyDirectoryRecursiveVerbose,
         copyFiles,
+        copyFileTo,
 
         -- * installing files
         installOrdinaryFile,
         installExecutableFile,
+        installMaybeExecutableFile,
         installOrdinaryFiles,
+        installExecutableFiles,
+        installMaybeExecutableFiles,
         installDirectoryContents,
 
         -- * File permissions
@@ -104,9 +108,13 @@ module Distribution.Simple.Utils (
         parseFileGlob,
         FileGlob(..),
 
+        -- * modification time
+        moreRecentFile,
+
         -- * temp files and dirs
-        withTempFile,
-        withTempDirectory,
+        TempFileOptions(..), defaultTempFileOptions,
+        withTempFile, withTempFileEx,
+        withTempDirectory, withTempDirectoryEx,
 
         -- * .cabal and .buildinfo files
         defaultPackageDesc,
@@ -151,12 +159,11 @@ import qualified Data.ByteString.Lazy as BS
 import qualified Data.ByteString.Lazy.Char8 as BS.Char8
 
 import System.Directory
-    ( getDirectoryContents, doesDirectoryExist, doesFileExist, removeFile
-    , findExecutable )
+    ( Permissions(executable), getDirectoryContents, getPermissions
+    , doesDirectoryExist, doesFileExist, removeFile, findExecutable
+    , getModificationTime )
 import System.Environment
     ( getProgName )
-import System.Cmd
-    ( rawSystem )
 import System.Exit
     ( exitWith, ExitCode(..) )
 import System.FilePath
@@ -187,8 +194,8 @@ import qualified Distribution.ModuleName as ModuleName
 import Distribution.Version
     (Version(..))
 
-import Control.Exception (evaluate)
-import System.Process (runProcess)
+import Control.Exception (IOException, evaluate, throwIO)
+import System.Process (rawSystem, runProcess)
 
 import Control.Concurrent (forkIO)
 import System.Process (runInteractiveProcess, waitForProcess)
@@ -202,7 +209,7 @@ import Distribution.Compat.CopyFile
 import Distribution.Compat.TempFile
          ( openTempFile, createTempDirectory )
 import Distribution.Compat.Exception
-         ( IOException, throwIOIO, tryIO, catchIO, catchExit )
+         ( tryIO, catchIO, catchExit )
 import Distribution.Verbosity
 
 #ifdef VERSION_base
@@ -234,14 +241,14 @@ dieWithLocation filename lineno msg =
 die :: String -> IO a
 die msg = ioError (userError msg)
 
-topHandler :: IO a -> IO a
-topHandler prog = catchIO prog handle
+topHandlerWith :: (Exception.IOException -> IO a) -> IO a -> IO a
+topHandlerWith cont prog = catchIO prog handle
   where
     handle ioe = do
       hFlush stdout
       pname <- getProgName
       hPutStr stderr (mesage pname)
-      exitWith (ExitFailure 1)
+      cont ioe
       where
         mesage pname = wrapText (pname ++ ": " ++ file ++ detail)
         file         = case ioeGetFileName ioe of
@@ -251,6 +258,9 @@ topHandler prog = catchIO prog handle
                          l@(n:_) | n >= '0' && n <= '9' -> ':' : l
                          _                              -> ""
         detail       = ioeGetErrorString ioe
+
+topHandler :: IO a -> IO a
+topHandler prog = topHandlerWith (const $ exitWith (ExitFailure 1)) prog
 
 -- | Non fatal conditions that may be indicative of an error or problem.
 --
@@ -408,15 +418,17 @@ rawSystemExitWithEnv verbosity path args env = do
 rawSystemIOWithEnv :: Verbosity
                    -> FilePath
                    -> [String]
-                   -> [(String, String)]
+                   -> Maybe FilePath           -- ^ New working dir or inherit
+                   -> Maybe [(String, String)] -- ^ New environment or inherit
                    -> Maybe Handle  -- ^ stdin
                    -> Maybe Handle  -- ^ stdout
                    -> Maybe Handle  -- ^ stderr
                    -> IO ExitCode
-rawSystemIOWithEnv verbosity path args env inp out err = do
-    printRawCommandAndArgsAndEnv verbosity path args env
+rawSystemIOWithEnv verbosity path args mcwd menv inp out err = do
+    maybe (printRawCommandAndArgs       verbosity path args)
+          (printRawCommandAndArgsAndEnv verbosity path args) menv
     hFlush stdout
-    ph <- runProcess path args Nothing (Just env) inp out err
+    ph <- runProcess path args mcwd menv inp out err
     exitcode <- waitForProcess ph
     unless (exitcode == ExitSuccess) $ do
       debug verbosity $ path ++ " returned " ++ show exitcode
@@ -429,6 +441,7 @@ rawSystemIOWithEnv verbosity path args env inp out err = do
 rawSystemStdout :: Verbosity -> FilePath -> [String] -> IO String
 rawSystemStdout verbosity path args = do
   (output, errors, exitCode) <- rawSystemStdInOut verbosity path args
+                                                  Nothing Nothing
                                                   Nothing False
   when (exitCode /= ExitSuccess) $
     die errors
@@ -439,15 +452,18 @@ rawSystemStdout verbosity path args = do
 -- mode of the input and output.
 --
 rawSystemStdInOut :: Verbosity
-                  -> FilePath -> [String]
-                  -> Maybe (String, Bool) -- ^ input text and binary mode
-                  -> Bool                 -- ^ output in binary mode
+                  -> FilePath                 -- ^ Program location
+                  -> [String]                 -- ^ Arguments
+                  -> Maybe FilePath           -- ^ New working dir or inherit
+                  -> Maybe [(String, String)] -- ^ New environment or inherit
+                  -> Maybe (String, Bool)     -- ^ input text and binary mode
+                  -> Bool                     -- ^ output in binary mode
                   -> IO (String, String, ExitCode) -- ^ output, errors, exit
-rawSystemStdInOut verbosity path args input outputBinary = do
+rawSystemStdInOut verbosity path args mcwd menv input outputBinary = do
   printRawCommandAndArgs verbosity path args
 
   Exception.bracket
-     (runInteractiveProcess path args Nothing Nothing)
+     (runInteractiveProcess path args mcwd menv)
      (\(inh,outh,errh,_) -> hClose inh >> hClose outh >> hClose errh)
     $ \(inh,outh,errh,pid) -> do
 
@@ -719,6 +735,23 @@ matchDirFileGlob dir filepath = case parseFileGlob filepath of
                     ++ "' does not match any files."
       matches -> return matches
 
+--------------------
+-- Modification time
+
+-- | Compare the modification times of two files to see if the first is newer
+-- than the second. The first file must exist but the second need not.
+-- The expected use case is when the second file is generated using the first.
+-- In this use case, if the result is True then the second file is out of date.
+--
+moreRecentFile :: FilePath -> FilePath -> IO Bool
+moreRecentFile a b = do
+  exists <- doesFileExist b
+  if not exists
+    then return True
+    else do tb <- getModificationTime b
+            ta <- getModificationTime a
+            return (ta > tb)
+
 ----------------------------------------
 -- Copying and installing files and dirs
 
@@ -735,11 +768,11 @@ createDirectoryIfMissingVerbose verbosity create_parents path0
     parents = reverse . scanl1 (</>) . splitDirectories . normalise
 
     createDirs []         = return ()
-    createDirs (dir:[])   = createDir dir throwIOIO
+    createDirs (dir:[])   = createDir dir throwIO
     createDirs (dir:dirs) =
       createDir dir $ \_ -> do
         createDirs dirs
-        createDir dir throwIOIO
+        createDir dir throwIO
 
     createDir :: FilePath -> (IOException -> IO ()) -> IO ()
     createDir dir notExistHandler = do
@@ -758,9 +791,9 @@ createDirectoryIfMissingVerbose verbosity create_parents path0
           | isAlreadyExistsError e -> (do
               isDir <- doesDirectoryExist dir
               if isDir then return ()
-                       else throwIOIO e
+                       else throwIO e
               ) `catchIO` ((\_ -> return ()) :: IOException -> IO ())
-          | otherwise              -> throwIOIO e
+          | otherwise              -> throwIO e
 
 createDirectoryVerbose :: Verbosity -> FilePath -> IO ()
 createDirectoryVerbose verbosity dir = do
@@ -796,6 +829,38 @@ installExecutableFile verbosity src dest = do
   info verbosity ("Installing executable " ++ src ++ " to " ++ dest)
   copyExecutableFile src dest
 
+-- | Install a file that may or not be executable, preserving permissions.
+installMaybeExecutableFile :: Verbosity -> FilePath -> FilePath -> IO ()
+installMaybeExecutableFile verbosity src dest = do
+  perms <- getPermissions src
+  if (executable perms) --only checks user x bit
+    then installExecutableFile verbosity src dest
+    else installOrdinaryFile   verbosity src dest
+
+-- | Given a relative path to a file, copy it to the given directory, preserving
+-- the relative path and creating the parent directories if needed.
+copyFileTo :: Verbosity -> FilePath -> FilePath -> IO ()
+copyFileTo verbosity dir file = do
+  let targetFile = dir </> file
+  createDirectoryIfMissingVerbose verbosity True (takeDirectory targetFile)
+  installOrdinaryFile verbosity file targetFile
+
+-- | Common implementation of 'copyFiles', 'installOrdinaryFiles',
+-- 'installExecutableFiles' and 'installMaybeExecutableFiles'.
+copyFilesWith :: (Verbosity -> FilePath -> FilePath -> IO ())
+              -> Verbosity -> FilePath -> [(FilePath, FilePath)] -> IO ()
+copyFilesWith doCopy verbosity targetDir srcFiles = do
+
+  -- Create parent directories for everything
+  let dirs = map (targetDir </>) . nub . map (takeDirectory . snd) $ srcFiles
+  mapM_ (createDirectoryIfMissingVerbose verbosity True) dirs
+
+  -- Copy all the files
+  sequence_ [ let src  = srcBase   </> srcFile
+                  dest = targetDir </> srcFile
+               in doCopy verbosity src dest
+            | (srcBase, srcFile) <- srcFiles ]
+
 -- | Copies a bunch of files to a target directory, preserving the directory
 -- structure in the target location. The target directories are created if they
 -- do not exist.
@@ -818,32 +883,24 @@ installExecutableFile verbosity src dest = do
 -- anything goes wrong.
 --
 copyFiles :: Verbosity -> FilePath -> [(FilePath, FilePath)] -> IO ()
-copyFiles verbosity targetDir srcFiles = do
-
-  -- Create parent directories for everything
-  let dirs = map (targetDir </>) . nub . map (takeDirectory . snd) $ srcFiles
-  mapM_ (createDirectoryIfMissingVerbose verbosity True) dirs
-
-  -- Copy all the files
-  sequence_ [ let src  = srcBase   </> srcFile
-                  dest = targetDir </> srcFile
-               in copyFileVerbose verbosity src dest
-            | (srcBase, srcFile) <- srcFiles ]
+copyFiles = copyFilesWith copyFileVerbose
 
 -- | This is like 'copyFiles' but uses 'installOrdinaryFile'.
 --
 installOrdinaryFiles :: Verbosity -> FilePath -> [(FilePath, FilePath)] -> IO ()
-installOrdinaryFiles verbosity targetDir srcFiles = do
+installOrdinaryFiles = copyFilesWith installOrdinaryFile
 
-  -- Create parent directories for everything
-  let dirs = map (targetDir </>) . nub . map (takeDirectory . snd) $ srcFiles
-  mapM_ (createDirectoryIfMissingVerbose verbosity True) dirs
+-- | This is like 'copyFiles' but uses 'installExecutableFile'.
+--
+installExecutableFiles :: Verbosity -> FilePath -> [(FilePath, FilePath)]
+                          -> IO ()
+installExecutableFiles = copyFilesWith installExecutableFile
 
-  -- Copy all the files
-  sequence_ [ let src  = srcBase   </> srcFile
-                  dest = targetDir </> srcFile
-               in installOrdinaryFile verbosity src dest
-            | (srcBase, srcFile) <- srcFiles ]
+-- | This is like 'copyFiles' but uses 'installMaybeExecutableFile'.
+--
+installMaybeExecutableFiles :: Verbosity -> FilePath -> [(FilePath, FilePath)]
+                               -> IO ()
+installMaybeExecutableFiles = copyFilesWith installMaybeExecutableFile
 
 -- | This installs all the files in a directory to a target location,
 -- preserving the directory layout. All the files are assumed to be ordinary
@@ -877,17 +934,33 @@ copyDirectoryRecursiveVerbose verbosity srcDir destDir = do
 ---------------------------
 -- Temporary files and dirs
 
+-- | Advanced options for 'withTempFile' and 'withTempDirectory'.
+data TempFileOptions = TempFileOptions {
+  optKeepTempFiles :: Bool  -- ^ Keep temporary files?
+  }
+
+defaultTempFileOptions :: TempFileOptions
+defaultTempFileOptions = TempFileOptions { optKeepTempFiles = False }
+
 -- | Use a temporary filename that doesn't already exist.
 --
-withTempFile :: Bool     -- ^ Keep temporary files?
-             -> FilePath -- ^ Temp dir to create the file in
-             -> String   -- ^ File name template. See 'openTempFile'.
-             -> (FilePath -> Handle -> IO a) -> IO a
-withTempFile keepTempFiles tmpDir template action =
+withTempFile :: FilePath    -- ^ Temp dir to create the file in
+                -> String   -- ^ File name template. See 'openTempFile'.
+                -> (FilePath -> Handle -> IO a) -> IO a
+withTempFile tmpDir template action =
+  withTempFileEx defaultTempFileOptions tmpDir template action
+
+-- | A version of 'withTempFile' that additionally takes a 'TempFileOptions'
+-- argument.
+withTempFileEx :: TempFileOptions
+                 -> FilePath -- ^ Temp dir to create the file in
+                 -> String   -- ^ File name template. See 'openTempFile'.
+                 -> (FilePath -> Handle -> IO a) -> IO a
+withTempFileEx opts tmpDir template action =
   Exception.bracket
     (openTempFile tmpDir template)
     (\(name, handle) -> do hClose handle
-                           unless keepTempFiles $ removeFile name)
+                           unless (optKeepTempFiles opts) $ removeFile name)
     (uncurry action)
 
 -- | Create and use a temporary directory.
@@ -901,12 +974,19 @@ withTempFile keepTempFiles tmpDir template action =
 -- @src/sdist.342@.
 --
 withTempDirectory :: Verbosity
-                  -> Bool     -- ^ Keep temporary files?
-                  -> FilePath -> String -> (FilePath -> IO a) -> IO a
-withTempDirectory _verbosity keepTempFiles targetDir template =
+                     -> FilePath -> String -> (FilePath -> IO a) -> IO a
+withTempDirectory verbosity targetDir template =
+  withTempDirectoryEx verbosity defaultTempFileOptions targetDir template
+
+-- | A version of 'withTempDirectory' that additionally takes a
+-- 'TempFileOptions' argument.
+withTempDirectoryEx :: Verbosity
+                       -> TempFileOptions
+                       -> FilePath -> String -> (FilePath -> IO a) -> IO a
+withTempDirectoryEx _verbosity opts targetDir template =
   Exception.bracket
     (createTempDirectory targetDir template)
-    (unless keepTempFiles . removeDirectoryRecursive)
+    (unless (optKeepTempFiles opts) . removeDirectoryRecursive)
 
 -----------------------------------
 -- Safely reading and writing files

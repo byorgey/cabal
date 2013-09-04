@@ -40,6 +40,8 @@ module Distribution.Client.Tar (
   TypeCode,
   Format(..),
   buildTreeRefTypeCode,
+  buildTreeSnapshotTypeCode,
+  isBuildTreeRefTypeCode,
   entrySizeInBlocks,
   entrySizeInBytes,
 
@@ -83,15 +85,15 @@ import qualified System.FilePath         as FilePath.Native
 import qualified System.FilePath.Windows as FilePath.Windows
 import qualified System.FilePath.Posix   as FilePath.Posix
 import System.Directory
-         ( getDirectoryContents, doesDirectoryExist, getModificationTime
+         ( getDirectoryContents, doesDirectoryExist
          , getPermissions, createDirectoryIfMissing, copyFile )
 import qualified System.Directory as Permissions
          ( Permissions(executable) )
-import Distribution.Compat.FilePerms
+import Distribution.Client.Compat.FilePerms
          ( setFileExecutable )
 import System.Posix.Types
          ( FileMode )
-import Distribution.Compat.Time
+import Distribution.Client.Compat.Time
 import System.IO
          ( IOMode(ReadMode), openBinaryFile, hFileSize )
 import System.IO.Unsafe (unsafeInterleaveIO)
@@ -115,7 +117,8 @@ extractTarGzFile :: FilePath -- ^ Destination directory
                  -> FilePath -- ^ Tarball
                 -> IO ()
 extractTarGzFile dir expected tar =
-  unpack dir . checkTarbomb expected . read . GZipUtils.maybeDecompress =<< BS.readFile tar
+  unpack dir . checkTarbomb expected . read
+  . GZipUtils.maybeDecompress =<< BS.readFile tar
 
 --
 -- * Entry type
@@ -157,6 +160,17 @@ data Entry = Entry {
 -- path.
 buildTreeRefTypeCode :: TypeCode
 buildTreeRefTypeCode = 'C'
+
+-- | Type code for the local build tree snapshot entry type.
+buildTreeSnapshotTypeCode :: TypeCode
+buildTreeSnapshotTypeCode = 'S'
+
+-- | Is this a type code for a build tree reference?
+isBuildTreeRefTypeCode :: TypeCode -> Bool
+isBuildTreeRefTypeCode typeCode
+  | (typeCode == buildTreeRefTypeCode
+     || typeCode == buildTreeSnapshotTypeCode) = True
+  | otherwise                                  = False
 
 -- | Native 'FilePath' of the file or directory within the archive.
 --
@@ -513,8 +527,10 @@ checkEntryTarbomb _ entry | nonFilesystemEntry = Nothing
 checkEntryTarbomb expectedTopDir entry =
   case FilePath.Native.splitDirectories (entryPath entry) of
     (topDir:_) | topDir == expectedTopDir -> Nothing
-    _ -> Just $ "File in tar archive is not in the expected directory "
-             ++ show expectedTopDir
+    s -> Just $ "File in tar archive is not in the expected directory. "
+             ++ "Expected: " ++ show expectedTopDir
+             ++ " but got the following hierarchy: "
+             ++ show s
 
 
 --
@@ -651,7 +667,8 @@ getChars :: Int64 -> Int64 -> ByteString -> String
 getChars off len = BS.Char8.unpack . getBytes off len
 
 getString :: Int64 -> Int64 -> ByteString -> String
-getString off len = BS.Char8.unpack . BS.Char8.takeWhile (/='\0') . getBytes off len
+getString off len = BS.Char8.unpack . BS.Char8.takeWhile (/='\0')
+                    . getBytes off len
 
 data Partial a = Error String | Ok a
 

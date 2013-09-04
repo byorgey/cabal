@@ -38,7 +38,7 @@ import Distribution.PackageDescription
 import Distribution.PackageDescription.Parse
          ( readPackageDescription )
 import Distribution.Simple.Configure
-         ( configCompiler )
+         ( configCompilerEx )
 import Distribution.Compiler ( buildCompilerId )
 import Distribution.Simple.Compiler
          ( CompilerFlavor(GHC), Compiler(compilerId)
@@ -46,7 +46,11 @@ import Distribution.Simple.Compiler
          , PackageDB(..), PackageDBStack )
 import Distribution.Simple.Program
          ( ProgramConfiguration, emptyProgramConfiguration
-         , getDbProgramOutput, runDbProgram, ghcProgram )
+         , getProgramSearchPath, getDbProgramOutput, runDbProgram, ghcProgram )
+import Distribution.Simple.Program.Find
+         ( programSearchPathAsPATHVar )
+import Distribution.Simple.Program.Run
+         ( getEffectiveEnvironment )
 import Distribution.Simple.BuildPaths
          ( defaultDistPref, exeExtension )
 import Distribution.Simple.Command
@@ -66,9 +70,9 @@ import Distribution.Simple.Setup
 import Distribution.Simple.Utils
          ( die, debug, info, cabalVersion, findPackageDesc, comparing
          , createDirectoryIfMissingVerbose, installExecutableFile
-         , rewriteFile, intercalate )
+         , moreRecentFile, rewriteFile, intercalate )
 import Distribution.Client.Utils
-         ( moreRecentFile, inDir )
+         ( inDir, tryCanonicalizePath )
 import Distribution.System ( Platform(..), buildPlatform )
 import Distribution.Text
          ( display )
@@ -77,7 +81,7 @@ import Distribution.Verbosity
 import Distribution.Compat.Exception
          ( catchIO )
 
-import System.Directory  ( doesFileExist, canonicalizePath )
+import System.Directory  ( doesFileExist )
 import System.FilePath   ( (</>), (<.>) )
 import System.IO         ( Handle, hPutStr )
 import System.Exit       ( ExitCode(..), exitWith )
@@ -102,6 +106,16 @@ data SetupScriptOptions = SetupScriptOptions {
 
     -- Used only when calling setupWrapper from parallel code to serialise
     -- access to the setup cache; should be Nothing otherwise.
+    --
+    -- Note: setup exe cache
+    ------------------------
+    -- When we are installing in parallel, we always use the external setup
+    -- method. Since compiling the setup script each time adds noticeable
+    -- overhead, we use a shared setup script cache
+    -- ('~/.cabal/setup-exe-cache'). For each (compiler, platform, Cabal
+    -- version) combination the cache holds a compiled setup script
+    -- executable. This only affects the Simple build type; for the Custom,
+    -- Configure and Make build types we always compile the setup script anew.
     setupCacheLock           :: Maybe Lock
   }
 
@@ -203,9 +217,11 @@ externalSetupMethod verbosity options pkg bt mkargs = do
   setupHs <- updateSetupScript cabalLibVersion bt
   debug verbosity $ "Using " ++ setupHs ++ " as setup script."
   path <- case bt of
+    -- TODO: Should we also cache the setup exe for the Make and Configure build
+    -- types?
     Simple -> getCachedSetupExecutable options' cabalLibVersion setupHs
     _      -> compileSetupExecutable options' cabalLibVersion setupHs False
-  invokeSetupScript path (mkargs cabalLibVersion)
+  invokeSetupScript options' path (mkargs cabalLibVersion)
 
   where
   workingDir       = case fromMaybe "" (useWorkingDir options) of
@@ -225,18 +241,12 @@ externalSetupMethod verbosity options pkg bt mkargs = do
   cabalLibVersionToUse :: IO (Version, SetupScriptOptions)
   cabalLibVersionToUse = do
     savedVersion <- savedCabalVersion
-    let versionRangeToUse = useCabalVersion options
     case savedVersion of
-      Just version | version `withinRange` versionRangeToUse
-                  -- If the Cabal lib version that cabal-install was compiled
-                  -- with can be used instead of the cached version,
-                  -- double-check that we really want to use the cached one.
-                  && (version == cabalVersion
-                      || not (cabalVersion `withinRange` versionRangeToUse))
+      Just version | version `withinRange` useCabalVersion options
         -> return (version, options)
       _ -> do (comp, conf, options') <- configureCompiler options
               version <- installedCabalVersion options' comp conf
-              rewriteFile setupVersionFile (show version ++ "\n")
+              writeFile setupVersionFile (show version ++ "\n")
               return (version, options')
 
   savedCabalVersion = do
@@ -253,7 +263,8 @@ externalSetupMethod verbosity options pkg bt mkargs = do
     index <- maybeGetInstalledPackages options' comp conf
     let cabalDep = Dependency (PackageName "Cabal") (useCabalVersion options')
     case PackageIndex.lookupDependency index cabalDep of
-      []   -> die $ "The package requires Cabal library version "
+      []   -> die $ "The package '" ++ display (packageName pkg)
+                 ++ "' requires Cabal library version "
                  ++ display (useCabalVersion options)
                  ++ " but no suitable version is installed."
       pkgs -> return $ bestVersion id (map fst pkgs)
@@ -282,7 +293,8 @@ externalSetupMethod verbosity options pkg bt mkargs = do
     index <- maybeGetInstalledPackages options' compiler conf
     let cabalPkgid = PackageIdentifier (PackageName "Cabal") cabalLibVersion
     case PackageIndex.lookupSourcePackageId index cabalPkgid of
-      []           -> die $ "The package requires Cabal library version "
+      []           -> die $ "The package '" ++ display (packageName pkg)
+                      ++ "' requires Cabal library version "
                       ++ display (cabalLibVersion)
                       ++ " but no suitable version is installed."
       iPkgInfos   -> return . Just . installedPackageId
@@ -294,7 +306,7 @@ externalSetupMethod verbosity options pkg bt mkargs = do
     (comp, conf) <- case useCompiler options' of
       Just comp -> return (comp, useProgramConfig options')
       Nothing   -> do (comp, _, conf) <-
-                        configCompiler (Just GHC) Nothing Nothing
+                        configCompilerEx (Just GHC) Nothing Nothing
                         (useProgramConfig options') verbosity
                       return (comp, conf)
     -- Whenever we need to call configureCompiler, we also need to access the
@@ -414,10 +426,10 @@ externalSetupMethod verbosity options pkg bt mkargs = do
     where
       setupProgFile = setupDir </> "setup" <.> exeExtension
 
-  invokeSetupScript :: FilePath -> [String] -> IO ()
-  invokeSetupScript path args = do
+  invokeSetupScript :: SetupScriptOptions -> FilePath -> [String] -> IO ()
+  invokeSetupScript options' path args = do
     info verbosity $ unwords (path : args)
-    case useLoggingHandle options of
+    case useLoggingHandle options' of
       Nothing        -> return ()
       Just logHandle -> info verbosity $ "Redirecting build log to "
                                       ++ show logHandle
@@ -426,10 +438,14 @@ externalSetupMethod verbosity options pkg bt mkargs = do
     -- be turned into an absolute path. On some systems, runProcess will take
     -- path as relative to the new working directory instead of the current
     -- working directory.
-    path' <- canonicalizePath path
+    path' <- tryCanonicalizePath path
+
+    searchpath <- programSearchPathAsPATHVar
+                    (getProgramSearchPath (useProgramConfig options'))
+    env        <- getEffectiveEnvironment [("PATH", Just searchpath)]
 
     process <- runProcess path' args
-                 (useWorkingDir options) Nothing
-                 Nothing (useLoggingHandle options) (useLoggingHandle options)
+                 (useWorkingDir options') env
+                 Nothing (useLoggingHandle options') (useLoggingHandle options')
     exitCode <- waitForProcess process
     unless (exitCode == ExitSuccess) $ exitWith exitCode

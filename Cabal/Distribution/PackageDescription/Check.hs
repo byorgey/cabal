@@ -543,6 +543,9 @@ checkLicense pkg =
     unknownLicenseVersion (LGPL (Just v))
       | v `notElem` knownVersions = Just knownVersions
       where knownVersions = [ v' | LGPL (Just v') <- knownLicenses ]
+    unknownLicenseVersion (AGPL (Just v))
+      | v `notElem` knownVersions = Just knownVersions
+      where knownVersions = [ v' | AGPL (Just v') <- knownLicenses ]
     unknownLicenseVersion (Apache  (Just v))
       | v `notElem` knownVersions = Just knownVersions
       where knownVersions = [ v' | Apache  (Just v') <- knownLicenses ]
@@ -849,11 +852,11 @@ checkPaths pkg =
       _            -> False
     -- paths that must be relative
     relPaths =
-         [ (path, "extra-src-files")  | path <- extraSrcFiles  pkg ]
-      ++ [ (path, "extra-tmp-files")  | path <- extraTmpFiles  pkg ]
-      ++ [ (path, "extra-html-files") | path <- extraHtmlFiles pkg ]
-      ++ [ (path, "data-files")       | path <- dataFiles      pkg ]
-      ++ [ (path, "data-dir")         | path <- [dataDir       pkg]]
+         [ (path, "extra-src-files") | path <- extraSrcFiles pkg ]
+      ++ [ (path, "extra-tmp-files") | path <- extraTmpFiles pkg ]
+      ++ [ (path, "extra-doc-files") | path <- extraDocFiles pkg ]
+      ++ [ (path, "data-files")      | path <- dataFiles     pkg ]
+      ++ [ (path, "data-dir")        | path <- [dataDir      pkg]]
       ++ concat
          [    [ (path, "c-sources")        | path <- cSources        bi ]
            ++ [ (path, "install-includes") | path <- installIncludes bi ]
@@ -1119,7 +1122,7 @@ checkCabalVersion pkg =
         (\v v' -> intersectVersionRanges (orLaterVersion v) (earlierVersion v'))
         intersectVersionRanges unionVersionRanges id
 
-    compatLicenses = [ GPL Nothing, LGPL Nothing, BSD3, BSD4
+    compatLicenses = [ GPL Nothing, LGPL Nothing, AGPL Nothing, BSD3, BSD4
                      , PublicDomain, AllRightsReserved, OtherLicense ]
 
     mentionedExtensions = [ ext | bi <- allBuildInfo pkg
