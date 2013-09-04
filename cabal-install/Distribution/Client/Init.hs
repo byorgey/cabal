@@ -674,10 +674,10 @@ generateCabalFile fileName c =
                 True
 
        , fieldS "homepage"      (homepage     c)
-                (Just "URL for the project homepage or repository.")
+                (Just "URL for the project homepage.")
                 False
 
-       , fieldS "bug-reports"   NoFlag
+       , fieldS "bug-reports"   (show <$> bugReports c)
                 (Just "A URL where users can report bugs.")
                 False
 
@@ -716,6 +716,8 @@ generateCabalFile fileName c =
        , field  "cabal-version" (Flag $ orLaterVersion (Version [1,10] []))
                 (Just "Constraint on the version of Cabal needed to build this package.")
                 False
+
+       -- XXX output source repo here
 
        , case packageType c of
            Flag Executable ->
