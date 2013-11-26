@@ -208,10 +208,11 @@ installAction (configFlags, configExFlags, installFlags, haddockFlags)
       installFlags'  = defaultInstallFlags          `mappend`
                        savedInstallFlags     config `mappend` installFlags
       globalFlags'   = savedGlobalFlags      config `mappend` globalFlags
+      haddockFlags'  = haddockFlags { haddockDistPref = configDistPref configFlags' }
   (comp, conf) <- configCompilerAux' configFlags'
   install verbosity
           (configPackageDB' configFlags') (globalRepos globalFlags')
-          comp conf globalFlags' configFlags' configExFlags' installFlags' haddockFlags
+          comp conf globalFlags' configFlags' configExFlags' installFlags' haddockFlags'
           targets
 
 listAction :: ListFlags -> [String] -> GlobalFlags -> IO ()
